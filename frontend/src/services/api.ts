@@ -409,6 +409,7 @@ async function requestJson<T>(
 
 const DEVICE_ID_STORAGE_KEY = "kultiva_device_id";
 const DEVICE_USER_STORAGE_KEY = "kultiva_device_user";
+const DEVICE_OWNED_TERRENOS_STORAGE_KEY = "kultiva_device_owned_terrenos";
 
 interface StoredDeviceUser {
   deviceId: string;
@@ -416,7 +417,10 @@ interface StoredDeviceUser {
   usuarioId: number;
 }
 
+type StoredOwnedTerrenosMap = Record<string, number[]>;
+
 let resolvedSessionUsuarioId: number | null = null;
+let sessionEndpointUnsupported = false;
 let inFlightUsuarioSession: Promise<number> | null = null;
 
 function readStorageItem(key: string): string | null {
@@ -434,6 +438,63 @@ function writeStorageItem(key: string, value: string): void {
     window.localStorage.setItem(key, value);
   } catch {
     // Ignora falha de armazenamento em modo privado/quota
+  }
+}
+
+function ownedScopeKey(deviceId: string): string {
+  return `${API_BASE_URL}::${deviceId}`;
+}
+
+function readOwnedTerrenosMap(): StoredOwnedTerrenosMap {
+  const raw = readStorageItem(DEVICE_OWNED_TERRENOS_STORAGE_KEY);
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as StoredOwnedTerrenosMap;
+    }
+  } catch {
+    // Cache inválido ignorado
+  }
+  return {};
+}
+
+function readOwnedTerrenoIds(deviceId = getOrCreateDeviceId()): number[] {
+  const list = readOwnedTerrenosMap()[ownedScopeKey(deviceId)];
+  if (!Array.isArray(list)) return [];
+  return Array.from(
+    new Set(
+      list.filter(
+        (id): id is number =>
+          typeof id === "number" && Number.isInteger(id) && id > 0
+      )
+    )
+  );
+}
+
+function writeOwnedTerrenoIds(ids: number[], deviceId = getOrCreateDeviceId()): void {
+  const map = readOwnedTerrenosMap();
+  const key = ownedScopeKey(deviceId);
+  if (ids.length === 0) {
+    delete map[key];
+  } else {
+    map[key] = Array.from(new Set(ids));
+  }
+  writeStorageItem(DEVICE_OWNED_TERRENOS_STORAGE_KEY, JSON.stringify(map));
+}
+
+export function registrarTerrenoDoDispositivo(terrenoId: number): void {
+  if (!Number.isInteger(terrenoId) || terrenoId <= 0) return;
+  const current = readOwnedTerrenoIds();
+  if (!current.includes(terrenoId)) {
+    writeOwnedTerrenoIds([...current, terrenoId]);
+  }
+}
+
+export function removerTerrenoDoDispositivo(terrenoId: number): void {
+  const current = readOwnedTerrenoIds();
+  if (current.includes(terrenoId)) {
+    writeOwnedTerrenoIds(current.filter((id) => id !== terrenoId));
   }
 }
 
@@ -474,6 +535,7 @@ function readCachedDeviceUsuarioId(deviceId: string): number | null {
 
 export function limparCacheUsuarioDispositivo(): void {
   resolvedSessionUsuarioId = null;
+  sessionEndpointUnsupported = false;
   inFlightUsuarioSession = null;
   if (typeof window !== "undefined") {
     try {
@@ -509,6 +571,7 @@ export async function obterOuCriarUsuarioDispositivo(
     true
   )
     .then((session) => {
+      sessionEndpointUnsupported = false;
       resolvedSessionUsuarioId = session.id;
       writeStorageItem(
         DEVICE_USER_STORAGE_KEY,
@@ -521,6 +584,13 @@ export async function obterOuCriarUsuarioDispositivo(
       return session.id;
     })
     .catch((err) => {
+      // Se o backend em deploy ainda não tiver /usuarios/sessao (404/405),
+      // mantém compatibilidade com DEFAULT_USUARIO_ID + filtro local por dispositivo.
+      if (err instanceof ApiError && (err.status === 404 || err.status === 405)) {
+        sessionEndpointUnsupported = true;
+        resolvedSessionUsuarioId = DEFAULT_USUARIO_ID;
+        return DEFAULT_USUARIO_ID;
+      }
       if (!forceRefresh && !(err instanceof ApiError)) {
         const cached = readCachedDeviceUsuarioId(deviceId);
         if (cached !== null) {
@@ -541,6 +611,43 @@ export function listarTerrenos(usuarioId?: number): Promise<TerrenoResponse[]> {
   const query =
     usuarioId !== undefined ? `?usuario_id=${encodeURIComponent(usuarioId)}` : "";
   return requestJson<TerrenoResponse[]>(`/terrenos/${query}`);
+}
+
+export async function listarTerrenosDoDispositivo(): Promise<TerrenoResponse[]> {
+  const usuarioId = await obterOuCriarUsuarioDispositivo();
+  const ownedIds = readOwnedTerrenoIds();
+
+  if (sessionEndpointUnsupported) {
+    if (ownedIds.length === 0) return [];
+    const terrenos = await listarTerrenos(DEFAULT_USUARIO_ID);
+    const ownedSet = new Set(ownedIds);
+    return terrenos.filter((terreno) => ownedSet.has(terreno.id));
+  }
+
+  let terrenos = await listarTerrenos(usuarioId);
+  const loadedIds = new Set(terrenos.map((terreno) => terreno.id));
+  const pendingMigration = ownedIds.filter((id) => !loadedIds.has(id));
+
+  if (pendingMigration.length > 0) {
+    let migratedAny = false;
+    await Promise.all(
+      pendingMigration.map(async (terrenoId) => {
+        try {
+          await atualizarTerreno(terrenoId, { usuario_id: usuarioId });
+          migratedAny = true;
+        } catch (err) {
+          if (err instanceof ApiError && err.status === 404) {
+            removerTerrenoDoDispositivo(terrenoId);
+          }
+        }
+      })
+    );
+    if (migratedAny) {
+      terrenos = await listarTerrenos(usuarioId);
+    }
+  }
+
+  return terrenos;
 }
 
 export function buscarTerreno(
@@ -566,12 +673,23 @@ export async function criarTerrenoParaDispositivo(
 ): Promise<TerrenoResponse> {
   const usuarioId = await obterOuCriarUsuarioDispositivo();
   try {
-    return await criarTerreno({ ...payload, usuario_id: usuarioId });
+    const created = await criarTerreno({ ...payload, usuario_id: usuarioId });
+    registrarTerrenoDoDispositivo(created.id);
+    return created;
   } catch (err) {
-    if (err instanceof ApiError && err.status === 404) {
+    if (
+      !sessionEndpointUnsupported &&
+      err instanceof ApiError &&
+      err.status === 404
+    ) {
       limparCacheUsuarioDispositivo();
       const freshUsuarioId = await obterOuCriarUsuarioDispositivo(true);
-      return criarTerreno({ ...payload, usuario_id: freshUsuarioId });
+      const created = await criarTerreno({
+        ...payload,
+        usuario_id: freshUsuarioId,
+      });
+      registrarTerrenoDoDispositivo(created.id);
+      return created;
     }
     throw err;
   }

@@ -20,8 +20,8 @@ import {
   type TerrenoResponse,
   excluirTerreno,
   formatarAreaHectares,
-  listarTerrenos,
-  obterOuCriarUsuarioDispositivo,
+  listarTerrenosDoDispositivo,
+  removerTerrenoDoDispositivo,
 } from "../services/api";
 
 export interface PlantationArea {
@@ -74,8 +74,7 @@ export function PlantationsPage({
     setIsLoading(true);
     setApiError(null);
     try {
-      const usuarioId = await obterOuCriarUsuarioDispositivo();
-      const terrenos = await listarTerrenos(usuarioId);
+      const terrenos = await listarTerrenosDoDispositivo();
       setAreas(terrenos.map(mapTerrenoToArea));
     } catch (error) {
       setAreas([]);
@@ -112,6 +111,7 @@ export function PlantationsPage({
       setIsDeleting(true);
       try {
         await excluirTerreno(areaToDelete.terrenoId, areaToDelete.usuarioId);
+        removerTerrenoDoDispositivo(areaToDelete.terrenoId);
       } catch (error) {
         setApiError(
           error instanceof Error
