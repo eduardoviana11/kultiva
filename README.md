@@ -94,6 +94,7 @@ npm run build
 ## Documentation (MkDocs)
 
 Project technical documentation uses **MkDocs Material**. To preview it locally with live reload:
+https://eduardoviana11.github.io/kultiva/
 
 ```bash
 pip install mkdocs-material
