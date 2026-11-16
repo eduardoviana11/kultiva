@@ -106,3 +106,10 @@ To validate the static documentation build:
 ```bash
 mkdocs build --strict
 ```
+
+## Members
+- [Edson Gabriel](https://github.com/EdsonToppzera)
+- [João Eduardo](https://github.com/eduardoviana11)
+- [João Guilherme](https://github.com/gleao-dev)
+- [Matheus Levi](https://github.com/matheuslevicarmo99)
+- [Sérgio Henrique](https://github.com/lealsh-dev)
